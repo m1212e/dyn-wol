@@ -1,0 +1,24 @@
+[package]
+name = "dyn-wol"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.41", features = ["full"] }
+async-trait = "0.1"
+futures = "0.3"
+libp2p = { version = "0.54", features = [
+    "tokio",
+    "gossipsub",
+    "mdns",
+    "noise",
+    "macros",
+    "tcp",
+    "yamux",
+    "quic",
+] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+config = "0.14"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+env_logger = "0.11"

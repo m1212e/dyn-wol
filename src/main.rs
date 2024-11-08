@@ -9,12 +9,15 @@ use std::error::Error;
 use std::hash::{Hash, Hasher};
 use std::time::Duration;
 use tokio::{io, select};
+use topics::extract_topic_message;
+use topics::host_info::HostInfoTopic;
+use topics::host_info_occupation::HostOccupationTopic;
 
 mod config;
-mod host_info;
+mod topics;
 
 #[derive(NetworkBehaviour)]
-struct MyBehaviour {
+pub struct MyBehaviour {
     gossipsub: gossipsub::Behaviour,
     mdns: mdns::tokio::Behaviour,
 }
@@ -83,6 +86,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .parse()?,
     )?;
 
+    let host_info_topic_instance = HostInfoTopic::register_topic(&mut swarm, &config)?;
+    let mut host_occupation_topic_instance =
+        HostOccupationTopic::register_topic(&mut swarm, &host_info_topic_instance)?;
+
     loop {
         select! {
             event = swarm.select_next_some() => match event {
@@ -98,14 +105,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
                     }
                 },
-                SwarmEvent::Behaviour(MyBehaviourEvent::Gossipsub(gossipsub::Event::Message {
-                    propagation_source: peer_id,
-                    message_id: id,
-                    message,
-                })) => info!(
-                        "Got message: '{}' with id: {id} from peer: {peer_id}",
-                        String::from_utf8_lossy(&message.data),
-                    ),
+                SwarmEvent::Behaviour(MyBehaviourEvent::Gossipsub(event)) => {
+                    if let Some(message) = extract_topic_message(&event, &host_info_topic_instance.topic_hash) {
+                        host_info_topic_instance.handle_incoming_topic_message(message).await;
+                    } else if let Some(message) = extract_topic_message(&event, &host_info_topic_instance.topic_hash) {
+                        host_occupation_topic_instance.handle_incoming_topic_message(message).await;
+                    }
+                },
                 SwarmEvent::NewListenAddr { address, .. } => {
                         info!("Listening on {address}");
                 }

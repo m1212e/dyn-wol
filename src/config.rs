@@ -8,6 +8,7 @@ use serde::Deserialize;
 pub struct AppConfig {
     pub host_ip: String,
     pub port: String,
+    pub token: String,
 }
 
 impl Default for AppConfig {
@@ -15,6 +16,7 @@ impl Default for AppConfig {
         Self {
             host_ip: "0.0.0.0".to_string(),
             port: "8080".to_string(),
+            token: String::default(),
         }
     }
 }
@@ -28,5 +30,15 @@ pub fn read_config() -> Result<AppConfig, Box<dyn Error>> {
 
     let conf: AppConfig = settings.try_deserialize()?;
     info!("Successfully read config!");
+
+    if conf.token == String::default() {
+        return Err(
+            "The token seems to be empty. Please make sure to configure a secure token!".into(),
+        );
+    }
+
+    if conf.token.len() < 32 {
+        return Err("The token is too short, it must have at least 32 chars!".into());
+    }
     Ok(conf)
 }

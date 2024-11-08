@@ -1,5 +1,3 @@
-use std::error::Error;
-
 use libp2p::{
     gossipsub::{self, TopicHash},
     PeerId,
@@ -8,7 +6,7 @@ use log::error;
 use serde::Deserialize;
 
 pub mod host_info;
-pub mod host_info_occupation;
+pub mod host_occupation;
 
 pub struct ExtractedTopicMessage<T: for<'a> Deserialize<'a>> {
     peer_id: PeerId,

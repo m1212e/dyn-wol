@@ -5,6 +5,7 @@ use libp2p::swarm::SwarmEvent;
 use libp2p::{gossipsub, mdns, swarm::NetworkBehaviour};
 use libp2p::{noise, tcp, yamux};
 use log::{error, info};
+use send_activation_action::send_activation_action;
 use std::collections::hash_map::DefaultHasher;
 use std::error::Error;
 use std::hash::{Hash, Hasher};
@@ -15,6 +16,7 @@ use topics::host_info::HostInfo;
 use topics::host_occupation::HostOccupation;
 
 mod config;
+mod send_activation_action;
 mod topics;
 
 #[derive(NetworkBehaviour)]
@@ -91,8 +93,52 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (outgoing_sender, outgoing_receiver) = kanal::unbounded_async::<(TopicHash, Vec<u8>)>();
 
     let host_info_instance = HostInfo::register(&mut swarm, &config, &outgoing_sender)?;
-    let mut host_occupation_instance =
+    let host_occupation_instance =
         HostOccupation::register(&mut swarm, &outgoing_sender, &host_info_instance)?;
+
+    tokio::spawn({
+        let occupation_map = host_occupation_instance.get_map();
+        let info_map = host_info_instance.get_map();
+        let occupation_level_percentage_threshold = config.occupation_level_percentage;
+        let our_peer_id = swarm.local_peer_id().clone();
+        let config = config.clone();
+        async move {
+            loop {
+                let total = HostOccupation::calculate_total_occupation(&occupation_map)
+                    .await
+                    .cpu_percentage;
+
+                let occupation_map_lock = occupation_map.read().await;
+                let info_map_lock = info_map.read().await;
+                if total > occupation_level_percentage_threshold as f32 {
+                    info!("Occupation level is too high: {total}");
+                    let lowest_other_peer_id =
+                        occupation_map_lock.iter().map(|v| v.0.to_string()).min();
+
+                    match lowest_other_peer_id {
+                        Some(lowest) => {
+                            if lowest > our_peer_id.to_string() {
+                                continue;
+                            }
+                        }
+                        None => {}
+                    }
+
+                    send_activation_action(
+                        info_map_lock
+                            .iter()
+                            .map(|v| v.1.mac_address)
+                            .collect::<Vec<_>>(),
+                        config
+                            .hosts
+                            .iter()
+                            .map(|v| v.mac_address)
+                            .collect::<Vec<_>>(),
+                    );
+                }
+            }
+        }
+    });
 
     tokio::spawn(async move {
         loop {
@@ -145,7 +191,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     extract_topic_message(&incoming, &host_info_instance.topic_hash)
                 {
                     host_info_instance
-                        .handle_incoming_topic_message(message)
+                        .handle_incoming_topic_message(message, &config.token)
                         .await;
                 } else if let Some(message) =
                     extract_topic_message(&incoming, &host_occupation_instance.topic_hash)

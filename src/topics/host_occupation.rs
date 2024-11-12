@@ -1,4 +1,4 @@
-use std::{collections::HashMap, error::Error, time::Duration};
+use std::{collections::HashMap, error::Error, sync::Arc, time::Duration};
 
 use crate::MyBehaviour;
 use kanal::AsyncSender;
@@ -13,21 +13,21 @@ use tokio::{sync::RwLock, time};
 
 use super::{host_info::HostInfo, ExtractedTopicMessage};
 
+type MapType = Arc<RwLock<HashMap<PeerId, OtherHostOccupation>>>;
+
 pub struct HostOccupation<'a> {
     pub topic_hash: TopicHash,
-    map: RwLock<HashMap<PeerId, OtherHostOccupation>>,
+    map: MapType,
     host_info: &'a HostInfo<'a>,
 }
 
-struct OtherHostOccupation {
+pub struct OtherHostOccupation {
     cpu_percentage: f32,
-    gpu_percentage: Option<u8>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
 pub struct HostOccupationMessage {
-    cpu_percentage: f32,
-    gpu_percentage: Option<u8>,
+    pub cpu_percentage: f32,
 }
 
 impl<'a> HostOccupation<'a> {
@@ -56,7 +56,7 @@ impl<'a> HostOccupation<'a> {
 
         Ok(HostOccupation {
             host_info,
-            map: RwLock::new(HashMap::new()),
+            map: Arc::new(RwLock::new(HashMap::new())),
             topic_hash: topic.hash(),
         })
     }
@@ -74,7 +74,6 @@ impl<'a> HostOccupation<'a> {
             data.peer_id,
             OtherHostOccupation {
                 cpu_percentage: data.message.cpu_percentage,
-                gpu_percentage: data.message.gpu_percentage,
             },
         );
     }
@@ -86,15 +85,8 @@ impl<'a> HostOccupation<'a> {
         let mut sys = System::new_all();
         sys.refresh_all();
 
-        // let mut instance_desc = InstanceDescriptor::default();
-        // instance_desc.backends = Backends::all();
-        // let instance = Instance::new(instance_desc);
-        // let adapters = instance.enumerate_adapters(wgpu::Backends::all());
-
         let message = HostOccupationMessage {
             cpu_percentage: sys.global_cpu_usage(),
-            //TODO enable support for gpu occupation stats
-            gpu_percentage: None,
         };
 
         let mut s = flexbuffers::FlexbufferSerializer::new();
@@ -106,6 +98,26 @@ impl<'a> HostOccupation<'a> {
         if let Err(err) = sender.send((topic_hash, s.view().into())).await {
             error!("Failed to send {err:#?}");
             return;
+        }
+    }
+
+    pub fn get_map(&self) -> MapType {
+        self.map.clone()
+    }
+
+    pub async fn calculate_total_occupation(map: &MapType) -> HostOccupationMessage {
+        let mut sys = System::new_all();
+        sys.refresh_all();
+
+        let others = map.read().await;
+        let mut total_occupation = sys.global_cpu_usage();
+
+        for (_, other_host_occupation) in others.iter() {
+            total_occupation += other_host_occupation.cpu_percentage;
+        }
+
+        HostOccupationMessage {
+            cpu_percentage: total_occupation / (others.len() as f32 + 1f32),
         }
     }
 }

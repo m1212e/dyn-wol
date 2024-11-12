@@ -1,6 +1,10 @@
-use std::{collections::HashMap, error::Error, time::Duration};
+use std::{collections::HashMap, error::Error, sync::Arc, time::Duration};
 
 use crate::{config::AppConfig, MyBehaviour};
+use argon2::{
+    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    Argon2,
+};
 use kanal::AsyncSender;
 use libp2p::{
     gossipsub::{self, TopicHash},
@@ -11,28 +15,27 @@ use mac_address::MacAddress;
 use serde::Serialize;
 use sysinfo::System;
 use tokio::{sync::RwLock, time};
-use wgpu::{Backends, Instance, InstanceDescriptor};
 
 use super::ExtractedTopicMessage;
+
+type MapType = Arc<RwLock<HashMap<PeerId, OtherHost>>>;
 
 pub struct HostInfo<'a> {
     config: &'a AppConfig,
     pub topic_hash: TopicHash,
-    map: RwLock<HashMap<PeerId, OtherHost>>,
+    map: MapType,
 }
 
-struct OtherHost {
+pub struct OtherHost {
     name: String,
-    mac_address: MacAddress,
-    has_gpu: bool,
+    pub mac_address: MacAddress,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
 pub struct HostInfoMessage {
-    token: String,
+    token_hash: String,
     mac_address: MacAddress,
     name: String,
-    has_gpu: bool,
 }
 
 impl<'a> HostInfo<'a> {
@@ -66,7 +69,7 @@ impl<'a> HostInfo<'a> {
 
         Ok(HostInfo {
             config,
-            map: RwLock::new(HashMap::new()),
+            map: Arc::new(RwLock::new(HashMap::new())),
             topic_hash: topic.hash(),
         })
     }
@@ -74,10 +77,22 @@ impl<'a> HostInfo<'a> {
     pub async fn handle_incoming_topic_message(
         &self,
         data: ExtractedTopicMessage<HostInfoMessage>,
+        token: &str,
     ) {
-        if !self.config.token.eq(&data.message.token) {
-            warn!("Got invalid token in host info message, ignoring!");
-            return;
+        let parsed_hash = match PasswordHash::new(&data.message.token_hash) {
+            Ok(v) => v,
+            Err(err) => {
+                error!("Could not parse hash: {err:#?}");
+                return;
+            }
+        };
+
+        match Argon2::default().verify_password(token.as_bytes(), &parsed_hash) {
+            Ok(v) => v,
+            Err(err) => {
+                error!("Got invalid token in host info message, ignoring! {err:#?}");
+                return;
+            }
         }
 
         self.map.write().await.insert(
@@ -85,13 +100,16 @@ impl<'a> HostInfo<'a> {
             OtherHost {
                 mac_address: data.message.mac_address,
                 name: data.message.name,
-                has_gpu: data.message.has_gpu,
             },
         );
     }
 
     pub async fn peer_id_is_registered(&self, id: &PeerId) -> bool {
         self.map.read().await.contains_key(id)
+    }
+
+    pub fn get_map(&self) -> MapType {
+        self.map.clone()
     }
 
     async fn broadcast_host_info(
@@ -121,16 +139,21 @@ impl<'a> HostInfo<'a> {
             }
         };
 
-        let mut instance_desc = InstanceDescriptor::default();
-        instance_desc.backends = Backends::all();
-        let instance = Instance::new(instance_desc);
-        let adapters = instance.enumerate_adapters(wgpu::Backends::all());
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        let token_hash = match argon2.hash_password(token.into_bytes().as_ref(), &salt) {
+            Ok(v) => v,
+            Err(err) => {
+                error!("Serialize error: {err:#?}");
+                return;
+            }
+        }
+        .to_string();
 
         let message = HostInfoMessage {
             mac_address,
-            token,
+            token_hash,
             name,
-            has_gpu: adapters.len() > 0,
         };
 
         let mut s = flexbuffers::FlexbufferSerializer::new();
